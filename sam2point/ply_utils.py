@@ -68,7 +68,7 @@ def read_ply(file_path):
     return points, colors
 
 
-def write_ply(file_path, points, colors=None, mask=None):
+def write_ply(file_path, points, colors=None, mask=None, segmented_color=None):
     """
     Write points and colors to a PLY file.
     
@@ -77,6 +77,7 @@ def write_ply(file_path, points, colors=None, mask=None):
         points (np.ndarray): Nx3 array of point coordinates
         colors (np.ndarray): Nx3 array of RGB colors (0-255)
         mask (np.ndarray): Boolean mask for segmentation visualization
+        segmented_color (list or np.ndarray): RGB color for segmented points (default: [255, 0, 0] red)
     """
     if colors is None:
         colors = np.ones((points.shape[0], 3)) * 255
@@ -84,9 +85,11 @@ def write_ply(file_path, points, colors=None, mask=None):
     # Apply mask coloring if provided
     if mask is not None:
         mask = mask.astype(bool)
-        # Set segmented points to green (0, 255, 0)
+        # Set segmented points to specified color (default red)
+        if segmented_color is None:
+            segmented_color = [255, 0, 0]  # Red by default
         colors = colors.copy()
-        colors[mask] = [0, 255, 0]
+        colors[mask] = segmented_color
     
     # Ensure colors are integers
     colors = colors.astype(np.uint8)
@@ -130,6 +133,28 @@ def extract_red_points(points, colors, tolerance=50):
     
     red_points = points[red_mask]
     return red_points
+
+
+def extract_green_points(points, colors, tolerance=50):
+    """
+    Extract points that are marked as green (negative prompts).
+    
+    Args:
+        points (np.ndarray): Nx3 array of point coordinates
+        colors (np.ndarray): Nx3 array of RGB colors (0-255)
+        tolerance (int): Tolerance for green color detection
+        
+    Returns:
+        np.ndarray: Mx3 array of green points coordinates
+    """
+    # Find points that are predominantly green
+    # Green should be high (close to 255), red and blue should be low
+    green_mask = (colors[:, 1] > 255 - tolerance) & \
+                 (colors[:, 0] < tolerance) & \
+                 (colors[:, 2] < tolerance)
+    
+    green_points = points[green_mask]
+    return green_points
 
 
 def load_ply_sample(data_path):

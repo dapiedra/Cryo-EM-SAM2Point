@@ -19,7 +19,7 @@ import argparse
 import numpy as np
 
 from segment import seg_point
-from sam2point.ply_utils import load_ply_sample, read_ply, write_ply, extract_red_points
+from sam2point.ply_utils import load_ply_sample, read_ply, write_ply, extract_red_points, extract_green_points
 from sam2point.voxelizer import Voxelizer
 from sam2point.utils import cal
 
@@ -48,9 +48,11 @@ def segment_ply_pointcloud(image_path, points_path, output_path, voxel_size=0.02
     """
     Segment a PLY point cloud using red-colored prompt points from another PLY file.
     
+    Output will be white (255, 255, 255) for all points, with segmented regions in red (255, 0, 0).
+    
     Args:
         image_path (str): Path to the input PLY point cloud to segment
-        points_path (str): Path to the PLY file containing red prompt points
+        points_path (str): Path to the PLY file containing red (positive) and green (negative) prompt points
         output_path (str): Path to save the segmented PLY file
         voxel_size (float): Voxel size for processing
     """
@@ -73,13 +75,18 @@ def segment_ply_pointcloud(image_path, points_path, output_path, voxel_size=0.02
     
     prompt_points_raw, prompt_colors_raw = read_ply(points_path)
     red_points = extract_red_points(prompt_points_raw, prompt_colors_raw)
+    green_points = extract_green_points(prompt_points_raw, prompt_colors_raw)
     
     if len(red_points) == 0:
         raise ValueError("No red points found in the prompt points file. "
-                        "Please mark prompt points with red color (255, 0, 0).")
+                        "Please mark positive prompt points with red color (255, 0, 0).")
     
-    print(f"Found {len(red_points)} red prompt points")
+    print(f"Found {len(red_points)} red (positive) prompt points")
+    if len(green_points) > 0:
+        print(f"Found {len(green_points)} green (negative) prompt points")
     print(f"Red points (raw): {red_points}")
+    if len(green_points) > 0:
+        print(f"Green points (raw): {green_points}")
     
     # Load the main point cloud to get the same normalization
     main_points_raw, _ = read_ply(image_path)
@@ -92,13 +99,25 @@ def segment_ply_pointcloud(image_path, points_path, output_path, voxel_size=0.02
     # Normalize red points using the same transformation
     red_points_normalized = (red_points - main_min) / (main_max - main_min)
     
+    # Normalize green points if present
+    green_points_normalized = None
+    if len(green_points) > 0:
+        green_points_normalized = (green_points - main_min) / (main_max - main_min)
+    
     print(f"Main point cloud bounds: min={main_min}, max={main_max}")
     print(f"Red points (normalized): {red_points_normalized}")
+    if green_points_normalized is not None:
+        print(f"Green points (normalized): {green_points_normalized}")
     
     # Validate that normalized points are in valid range
     for i, pt in enumerate(red_points_normalized):
         if not (0 <= pt[0] <= 1 and 0 <= pt[1] <= 1 and 0 <= pt[2] <= 1):
-            print(f"Warning: Prompt point {i} is outside [0,1] bounds: {pt}")
+            print(f"Warning: Positive prompt point {i} is outside [0,1] bounds: {pt}")
+    
+    if green_points_normalized is not None:
+        for i, pt in enumerate(green_points_normalized):
+            if not (0 <= pt[0] <= 1 and 0 <= pt[1] <= 1 and 0 <= pt[2] <= 1):
+                print(f"Warning: Negative prompt point {i} is outside [0,1] bounds: {pt}")
     
     # Create configuration
     args = Args(voxel_size=voxel_size)
@@ -124,35 +143,48 @@ def segment_ply_pointcloud(image_path, points_path, output_path, voxel_size=0.02
         voxel_coord = np.array(prompt_point) / args.voxel_size + 2
         if all(0 <= coord < max_voxel_coords[j] + 5 for j, coord in enumerate(voxel_coord)):
             valid_prompts.append(prompt_point)
-            print(f"Prompt {i+1} is valid: {prompt_point} -> voxel {voxel_coord}")
+            print(f"Positive prompt {i+1} is valid: {prompt_point} -> voxel {voxel_coord}")
         else:
-            print(f"Warning: Skipping prompt {i+1} outside voxel bounds: {prompt_point} -> voxel {voxel_coord}")
+            print(f"Warning: Skipping positive prompt {i+1} outside voxel bounds: {prompt_point} -> voxel {voxel_coord}")
     
     if not valid_prompts:
-        raise ValueError("No valid prompt points within voxel bounds")
+        raise ValueError("No valid positive prompt points within voxel bounds")
     
     prompt_list = valid_prompts
+    
+    # Process negative prompts similarly
+    negative_prompt_list = []
+    if green_points_normalized is not None:
+        for i, prompt_point in enumerate(green_points_normalized.tolist()):
+            voxel_coord = np.array(prompt_point) / args.voxel_size + 2
+            if all(0 <= coord < max_voxel_coords[j] + 5 for j, coord in enumerate(voxel_coord)):
+                negative_prompt_list.append(prompt_point)
+                print(f"Negative prompt {i+1} is valid: {prompt_point} -> voxel {voxel_coord}")
+            else:
+                print(f"Warning: Skipping negative prompt {i+1} outside voxel bounds: {prompt_point} -> voxel {voxel_coord}")
+    
     args.prompt_idx = 0  # Use first prompt point for main processing
     
     try:
         # Process each prompt point individually to avoid indexing issues
         all_masks = []
         for i, prompt_point in enumerate(prompt_list):
-            print(f"Processing prompt point {i+1}/{len(prompt_list)}: {prompt_point}")
+            print(f"Processing positive prompt point {i+1}/{len(prompt_list)}: {prompt_point}")
             args.prompt_idx = 0  # Always use index 0 since we pass one prompt at a time
             
             try:
-                # Pass only one prompt point at a time
+                # Pass only one prompt point at a time, along with all negative points
                 single_prompt_list = [prompt_point]
-                mask = seg_point(locs, feats, single_prompt_list, args)
+                mask = seg_point(locs, feats, single_prompt_list, args, 
+                               negative_prompt=negative_prompt_list if len(negative_prompt_list) > 0 else None)
                 all_masks.append(mask)
-                print(f"Successfully processed prompt point {i+1}")
+                print(f"Successfully processed positive prompt point {i+1}")
             except Exception as e:
-                print(f"Warning: Failed to process prompt point {i+1}: {e}")
+                print(f"Warning: Failed to process positive prompt point {i+1}: {e}")
                 continue
         
         if not all_masks:
-            raise RuntimeError("Failed to process any prompt points")
+            raise RuntimeError("Failed to process any positive prompt points")
         
         # Combine all masks (union of all segmentations)
         combined_mask = all_masks[0]
@@ -187,16 +219,19 @@ def segment_ply_pointcloud(image_path, points_path, output_path, voxel_size=0.02
     print(f"Point mask sum: {point_mask.sum()}")
     print(f"Segmented {point_mask.sum()} out of {len(point)} points")
     
-    # Prepare output
-    original_points, original_colors = read_ply(image_path)
+    # Prepare output - get coordinates from the image file
+    original_points, _ = read_ply(image_path)
+    
+    # Create white base colors for all points
+    white_colors = np.ones((len(original_points), 3), dtype=np.uint8) * 255
     
     # Create output directory if it doesn't exist
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
     
-    # Write the segmented PLY file
-    write_ply(output_path, original_points, original_colors, point_mask.numpy())
+    # Write the segmented PLY file: white base + red for segmented points
+    write_ply(output_path, original_points, white_colors, point_mask.numpy(), segmented_color=[255, 0, 0])
     
     print(f"Segmentation completed! Output saved to: {output_path}")
     
@@ -212,6 +247,10 @@ def main():
 Examples:
     python segment_ply.py --image scene.ply --points prompts.ply --output result.ply
     python segment_ply.py --image data.ply --points points.ply --output out.ply --voxel-size 0.01
+    
+Output colors:
+    - All points: White (255, 255, 255)
+    - Segmented points: Red (255, 0, 0)
         """
     )
     

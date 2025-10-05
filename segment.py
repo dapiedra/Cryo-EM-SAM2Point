@@ -26,7 +26,7 @@ def grid_to_frames(grid, foldpath, args):
     return frame_names
 
 
-def segment_point(frame_paths, point):
+def segment_point(frame_paths, point, negative_points=None):
     sam2_checkpoint = CHECKPOINT
     model_cfg = MODELCFG
     
@@ -38,10 +38,18 @@ def segment_point(frame_paths, point):
     ann_frame_idx = 0  # the frame index we interact with
     ann_obj_id = 1  # give a unique id to each object we interact with (it can be any integers)
 
-    # Let's add a positive click at (x, y) = (210, 350) to get started
+    # Prepare positive and negative points
     points = np.array([point], dtype=np.float32)
     # for labels, `1` means positive click and `0` means negative click
     labels = np.array([1], np.int32)
+    
+    # Add negative points if provided
+    if negative_points is not None and len(negative_points) > 0:
+        negative_points_array = np.array(negative_points, dtype=np.float32)
+        points = np.vstack([points, negative_points_array])
+        negative_labels = np.zeros(len(negative_points), dtype=np.int32)
+        labels = np.concatenate([labels, negative_labels])
+    
     _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
         inference_state=inference_state,
         frame_idx=ann_frame_idx,
@@ -156,7 +164,7 @@ def segment_mask(frame_paths, point):
     
     return masks, mask_prompt
                             
-def seg_point(locs, feats, prompt, args):
+def seg_point(locs, feats, prompt, args, negative_prompt=None):
     num_voxels = locs.max().astype(int)
     grid = np.ones((num_voxels + 5, num_voxels+5, num_voxels+5, 3))
     
@@ -183,24 +191,37 @@ def seg_point(locs, feats, prompt, args):
 
     pixel = voxel_coords * 1.0 / X * RESOLUTION + args.theta * RESOLUTION / X
     pixel = pixel.astype(int)
+    
+    # Process negative prompts if provided
+    negative_pixels = None
+    if negative_prompt is not None and len(negative_prompt) > 0:
+        negative_voxel_coords = np.array(negative_prompt) / args.voxel_size + 2
+        negative_voxel_coords = negative_voxel_coords.astype(int)
+        negative_pixels = negative_voxel_coords * 1.0 / X * RESOLUTION + args.theta * RESOLUTION / X
+        negative_pixels = negative_pixels.astype(int)
 
     idx = args.prompt_idx
     a0_paths_0, a0_paths_1 = a0_frame_paths[:voxel_coords[idx, 0]+1][::-1], a0_frame_paths[voxel_coords[idx, 0]:]
     a1_paths_0, a1_paths_1 = a1_frame_paths[:voxel_coords[idx, 1]+1][::-1], a1_frame_paths[voxel_coords[idx, 1]:]
     a2_paths_0, a2_paths_1 = a2_frame_paths[:voxel_coords[idx, 2]+1][::-1], a2_frame_paths[voxel_coords[idx, 2]:]
     
-    a0_mask_0 = torch.flip(segment_point(a0_paths_0, [pixel[idx, 2], pixel[idx, 1]]), dims=[0])
-    a0_mask_1 = segment_point(a0_paths_1, [pixel[idx, 2], pixel[idx, 1]])[1:, :, :]
+    # Prepare negative points for each axis if available
+    neg_points_a0 = [[neg_px[2], neg_px[1]] for neg_px in negative_pixels] if negative_pixels is not None else None
+    neg_points_a1 = [[neg_px[2], neg_px[0]] for neg_px in negative_pixels] if negative_pixels is not None else None
+    neg_points_a2 = [[neg_px[1], neg_px[0]] for neg_px in negative_pixels] if negative_pixels is not None else None
+    
+    a0_mask_0 = torch.flip(segment_point(a0_paths_0, [pixel[idx, 2], pixel[idx, 1]], neg_points_a0), dims=[0])
+    a0_mask_1 = segment_point(a0_paths_1, [pixel[idx, 2], pixel[idx, 1]], neg_points_a0)[1:, :, :]
     a0_mask = torch.cat([a0_mask_0, a0_mask_1], dim=0)
     a0_mask = torch.nn.functional.interpolate(a0_mask.unsqueeze(0).unsqueeze(0), size=(X, X, X), mode='trilinear').squeeze(0)
     
-    a1_mask_0 = torch.flip(segment_point(a1_paths_0, [pixel[idx, 2], pixel[idx, 0]]), dims=[0])
-    a1_mask_1 = segment_point(a1_paths_1, [pixel[idx, 2], pixel[idx, 0]])[1:, :, :]
+    a1_mask_0 = torch.flip(segment_point(a1_paths_0, [pixel[idx, 2], pixel[idx, 0]], neg_points_a1), dims=[0])
+    a1_mask_1 = segment_point(a1_paths_1, [pixel[idx, 2], pixel[idx, 0]], neg_points_a1)[1:, :, :]
     a1_mask = torch.cat([a1_mask_0, a1_mask_1], dim=0)
     a1_mask = torch.nn.functional.interpolate(a1_mask.unsqueeze(0).unsqueeze(0), size=(X, X, X), mode='trilinear').squeeze(0)
     
-    a2_mask_0 = torch.flip(segment_point(a2_paths_0, [pixel[idx, 1], pixel[idx, 0]]), dims=[0])
-    a2_mask_1 = segment_point(a2_paths_1, [pixel[idx, 1], pixel[idx, 0]])[1:, :, :]
+    a2_mask_0 = torch.flip(segment_point(a2_paths_0, [pixel[idx, 1], pixel[idx, 0]], neg_points_a2), dims=[0])
+    a2_mask_1 = segment_point(a2_paths_1, [pixel[idx, 1], pixel[idx, 0]], neg_points_a2)[1:, :, :]
     a2_mask = torch.cat([a2_mask_0, a2_mask_1], dim=0)
     a2_mask = torch.nn.functional.interpolate(a2_mask.unsqueeze(0).unsqueeze(0), size=(X, X, X), mode='trilinear').squeeze(0)
     

@@ -4,7 +4,9 @@ This document explains how to use the new PLY segmentation functionality with SA
 
 ## Overview
 
-The `segment_ply.py` script allows you to segment 3D point clouds in PLY format using positive point prompts. The prompt points should be marked with red color (255, 0, 0) in a separate PLY file.
+The `segment_ply.py` script allows you to segment 3D point clouds in PLY format using positive and negative point prompts. Prompt points should be marked with specific colors in a separate PLY file:
+- **Red (255, 0, 0)**: Positive prompts - points inside the object of interest
+- **Green (0, 255, 0)**: Negative prompts - points in the background or regions to exclude
 
 ## Files Added
 
@@ -21,7 +23,7 @@ python segment_ply.py --image scene.ply --points prompts.ply --output result.ply
 
 ### Arguments
 - `--image`: Path to the input PLY point cloud file to segment
-- `--points`: Path to the PLY file containing red-colored prompt points  
+- `--points`: Path to the PLY file containing colored prompt points (red for positive, green for negative)
 - `--output`: Path to save the segmented PLY output file
 - `--voxel-size`: (Optional) Voxel size for processing (default: 0.02)
 
@@ -29,6 +31,8 @@ python segment_ply.py --image scene.ply --points prompts.ply --output result.ply
 ```bash
 python segment_ply.py --image data/scene.ply --points data/prompts.ply --output results/segmented.ply --voxel-size 0.01
 ```
+
+The output will be white (255, 255, 255) for all points, with segmented regions in red (255, 0, 0).
 
 ## Running on Remote Server
 
@@ -115,16 +119,46 @@ chmod +x batch_segment.sh
 ### Prompt PLY File (--points)
 - Standard PLY format with vertex coordinates (x, y, z)
 - **Must** include color information (red, green, blue)
-- Positive prompt points **must** be colored red (255, 0, 0)
+- **Positive prompt points** must be colored **red (255, 0, 0)** - mark points inside the object
+- **Negative prompt points** should be colored **green (0, 255, 0)** - mark background/exclude regions
 - Other colored points will be ignored
 - Should be in the same coordinate system as the scene file
+- At least one red (positive) point is required; green (negative) points are optional
+
+## Using Positive and Negative Points
+
+### Positive Points (Red)
+Positive points indicate regions you **want to segment**. Place red points:
+- Inside the object of interest
+- On surfaces you want to include
+- In multiple locations for complex or ambiguous objects
+
+### Negative Points (Green)
+Negative points indicate regions you **want to exclude** from segmentation. Use green points to:
+- Mark background regions
+- Exclude nearby objects that might be accidentally included
+- Refine segmentation boundaries
+- Remove false positives
+
+### Example Workflow
+1. Start with red points on your object of interest
+2. Run initial segmentation
+3. If unwanted regions are included, add green points in those areas
+4. Re-run segmentation with both red and green points for refined results
+
+### Color Requirements
+- **Red**: RGB(255, 0, 0) - Positive prompts
+- **Green**: RGB(0, 255, 0) - Negative prompts
+- Color tolerance is 50 by default (e.g., RGB(255, 20, 20) is still considered red)
 
 ## Output
 
 The output PLY file contains:
-- Original point coordinates
-- Original colors for non-segmented points
-- Green color (0, 255, 0) for segmented points
+- Original point coordinates from the scene
+- **White color (255, 255, 255)** for all non-segmented points
+- **Red color (255, 0, 0)** for segmented points
+
+**Note:** The output creates a clean visualization with white background and red highlights for segmented regions. Prompt points are NOT included in the output.
 
 ## Testing
 
@@ -150,15 +184,17 @@ To test the functionality with sample data:
 
 ### Common Issues
 
-1. **"No red points found"**: Ensure prompt points are exactly RGB (255, 0, 0)
-2. **Memory errors**: Try increasing voxel size (e.g., 0.05 instead of 0.02)
-3. **CUDA errors**: Ensure GPU drivers and PyTorch CUDA are properly installed
-4. **File not found**: Check file paths and ensure PLY files are valid
+1. **"No red points found"**: Ensure positive prompt points are RGB (255, 0, 0) or within tolerance
+2. **Segmentation includes unwanted regions**: Add green (negative) points in those areas
+3. **Memory errors**: Try increasing voxel size (e.g., 0.05 instead of 0.02)
+4. **CUDA errors**: Ensure GPU drivers and PyTorch CUDA are properly installed
+5. **File not found**: Check file paths and ensure PLY files are valid
+6. **Green points not working**: Verify green points are RGB (0, 255, 0) and contain color information
 
 ### Checking PLY Files
 To verify your PLY files are valid:
 ```python
-from sam2point.ply_utils import read_ply, extract_red_points
+from sam2point.ply_utils import read_ply, extract_red_points, extract_green_points
 
 # Check scene file
 points, colors = read_ply('scene.ply')
@@ -167,7 +203,9 @@ print(f"Scene: {len(points)} points")
 # Check prompt file
 points, colors = read_ply('prompts.ply')
 red_points = extract_red_points(points, colors)
-print(f"Prompts: {len(red_points)} red points found")
+green_points = extract_green_points(points, colors)
+print(f"Prompts: {len(red_points)} red (positive) points found")
+print(f"Prompts: {len(green_points)} green (negative) points found")
 ```
 
 ## Integration with Existing Workflow
