@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# Batch PLY processing script
+# This script processes multiple pairs of PLY files from an input folder
+
+# Remove any existing video output
+rm -rf video
+
+# Configuration
+INPUT_FOLDER="/work/dpierdra/mini_dataset"
+OUTPUT_FOLDER="/work/dpierdra/SAM2Point/output"
+VOXEL_SIZE=0.35
+
+echo "Running batch PLY segmentation..."
+echo "Input folder: $INPUT_FOLDER"
+echo "Output folder: $OUTPUT_FOLDER"
+echo "Voxel size: $VOXEL_SIZE"
+
+# Run the batch processing
+python3 segment_ply_batch.py \
+    --input-folder "$INPUT_FOLDER" \
+    --output-folder "$OUTPUT_FOLDER" \
+    --voxel-size "$VOXEL_SIZE"
+
+echo "Batch processing completed!"
