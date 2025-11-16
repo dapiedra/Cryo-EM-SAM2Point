@@ -1,6 +1,7 @@
 from PIL import Image
 import numpy as np
 import torch, os
+import gc
 import sam2point.utils as utils
 from sam2.build_sam import build_sam2_video_predictor, build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
@@ -26,11 +27,27 @@ def grid_to_frames(grid, foldpath, args):
     return frame_names
 
 
-def segment_point(frame_paths, point, negative_points=None):
-    sam2_checkpoint = CHECKPOINT
-    model_cfg = MODELCFG
+def segment_point(frame_paths, point, negative_points=None, predictor=None):
+    """
+    Segment a point in a video sequence.
     
-    predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint)
+    Args:
+        frame_paths: List of paths to video frames
+        point: Point coordinates [x, y]
+        negative_points: Optional list of negative point coordinates
+        predictor: Optional pre-initialized SAM2 predictor (recommended for reuse)
+    
+    Returns:
+        torch.Tensor: Segmentation masks
+    """
+    # Use provided predictor or create new one
+    predictor_created = False
+    if predictor is None:
+        sam2_checkpoint = CHECKPOINT
+        model_cfg = MODELCFG
+        predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint)
+        predictor_created = True
+    
     inference_state = predictor.init_state(frame_paths=frame_paths)
     
     predictor.reset_state(inference_state)
@@ -45,10 +62,14 @@ def segment_point(frame_paths, point, negative_points=None):
     
     # Add negative points if provided
     if negative_points is not None and len(negative_points) > 0:
+        print(f"    [segment_point] Using {len(negative_points)} negative points with 1 positive point")
         negative_points_array = np.array(negative_points, dtype=np.float32)
         points = np.vstack([points, negative_points_array])
         negative_labels = np.zeros(len(negative_points), dtype=np.int32)
         labels = np.concatenate([labels, negative_labels])
+        print(f"    [segment_point] Total points: {len(points)}, Labels: {labels} (1=positive, 0=negative)")
+    else:
+        print(f"    [segment_point] Using only 1 positive point (no negative points)")
     
     _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
         inference_state=inference_state,
@@ -72,6 +93,15 @@ def segment_point(frame_paths, point, negative_points=None):
             out_mask = torch.from_numpy(out_mask * 1.0)
             masks.append(out_mask)
     masks = torch.cat(masks, dim=0)
+    
+    # Clean up inference state and video segments (but keep predictor if reusing)
+    del inference_state, video_segments
+    if predictor_created:
+        del predictor
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+    
     return masks
             
 
@@ -114,6 +144,13 @@ def segment_box(frame_paths, box, n_frame):
             out_mask = torch.from_numpy(out_mask * 1.0)
             masks.append(out_mask)
     masks = torch.cat(masks, dim=0)
+    
+    # Clean up predictor and inference state to free GPU memory
+    del predictor, inference_state, video_segments
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+    
     # print(masks.shape)
     return masks
             
@@ -164,7 +201,21 @@ def segment_mask(frame_paths, point):
     
     return masks, mask_prompt
                             
-def seg_point(locs, feats, prompt, args, negative_prompt=None):
+def seg_point(locs, feats, prompt, args, negative_prompt=None, predictor=None):
+    """
+    Segment a 3D point cloud using prompts.
+    
+    Args:
+        locs: Voxel locations
+        feats: Voxel features (RGB colors)
+        prompt: List of positive prompt points
+        args: Arguments object
+        negative_prompt: Optional list of negative prompt points
+        predictor: Optional pre-initialized SAM2 predictor (recommended for batch processing to avoid OOM)
+    
+    Returns:
+        torch.Tensor: Binary segmentation mask
+    """
     num_voxels = locs.max().astype(int)
     grid = np.ones((num_voxels + 5, num_voxels+5, num_voxels+5, 3))
     
@@ -175,9 +226,9 @@ def seg_point(locs, feats, prompt, args, negative_prompt=None):
     
     X, Y, Z, _ = grid.shape
     grid = torch.from_numpy(grid)
-    
+
     name_list = ["./video/" + args.dataset, "sample" + str(args.sample_idx), args.prompt_type + "-prompt" + str(args.prompt_idx)]
-    name = '_'.join(name_list)
+    name = '_'.join(name_list)     
     os.makedirs(name + 'frames', exist_ok=True)
     axis0, axis1, axis2 = name + "frames/x", name + "frames/y", name + "frames/z"
     grid0, grid1, grid2 = grid.permute(0,3,1,2), grid.permute(1,3,0,2), grid.permute(2,3,0,1)
@@ -195,10 +246,14 @@ def seg_point(locs, feats, prompt, args, negative_prompt=None):
     # Process negative prompts if provided
     negative_pixels = None
     if negative_prompt is not None and len(negative_prompt) > 0:
+        print(f"  Converting {len(negative_prompt)} negative prompt points to pixel coordinates...")
         negative_voxel_coords = np.array(negative_prompt) / args.voxel_size + 2
         negative_voxel_coords = negative_voxel_coords.astype(int)
         negative_pixels = negative_voxel_coords * 1.0 / X * RESOLUTION + args.theta * RESOLUTION / X
         negative_pixels = negative_pixels.astype(int)
+        print(f"  Negative pixels for 3 axes: {len(negative_pixels)} points each")
+    else:
+        print(f"  No negative prompt points provided")
 
     idx = args.prompt_idx
     a0_paths_0, a0_paths_1 = a0_frame_paths[:voxel_coords[idx, 0]+1][::-1], a0_frame_paths[voxel_coords[idx, 0]:]
@@ -210,27 +265,57 @@ def seg_point(locs, feats, prompt, args, negative_prompt=None):
     neg_points_a1 = [[neg_px[2], neg_px[0]] for neg_px in negative_pixels] if negative_pixels is not None else None
     neg_points_a2 = [[neg_px[1], neg_px[0]] for neg_px in negative_pixels] if negative_pixels is not None else None
     
-    a0_mask_0 = torch.flip(segment_point(a0_paths_0, [pixel[idx, 2], pixel[idx, 1]], neg_points_a0), dims=[0])
-    a0_mask_1 = segment_point(a0_paths_1, [pixel[idx, 2], pixel[idx, 1]], neg_points_a0)[1:, :, :]
-    a0_mask = torch.cat([a0_mask_0, a0_mask_1], dim=0)
-    a0_mask = torch.nn.functional.interpolate(a0_mask.unsqueeze(0).unsqueeze(0), size=(X, X, X), mode='trilinear').squeeze(0)
+    if negative_pixels is not None:
+        print(f"  Prepared negative points for segmentation on 3 axes (axis0: {len(neg_points_a0)}, axis1: {len(neg_points_a1)}, axis2: {len(neg_points_a2)} points)")
     
-    a1_mask_0 = torch.flip(segment_point(a1_paths_0, [pixel[idx, 2], pixel[idx, 0]], neg_points_a1), dims=[0])
-    a1_mask_1 = segment_point(a1_paths_1, [pixel[idx, 2], pixel[idx, 0]], neg_points_a1)[1:, :, :]
-    a1_mask = torch.cat([a1_mask_0, a1_mask_1], dim=0)
-    a1_mask = torch.nn.functional.interpolate(a1_mask.unsqueeze(0).unsqueeze(0), size=(X, X, X), mode='trilinear').squeeze(0)
+    # Create a single predictor instance to reuse for all 6 segment_point calls
+    # This dramatically reduces memory usage by not creating 6 separate predictors
+    # If predictor is provided from batch processing, reuse it instead of creating new one
+    predictor_created = False
+    if predictor is None:
+        sam2_checkpoint = CHECKPOINT
+        model_cfg = MODELCFG
+        predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint)
+        predictor_created = True
     
-    a2_mask_0 = torch.flip(segment_point(a2_paths_0, [pixel[idx, 1], pixel[idx, 0]], neg_points_a2), dims=[0])
-    a2_mask_1 = segment_point(a2_paths_1, [pixel[idx, 1], pixel[idx, 0]], neg_points_a2)[1:, :, :]
-    a2_mask = torch.cat([a2_mask_0, a2_mask_1], dim=0)
-    a2_mask = torch.nn.functional.interpolate(a2_mask.unsqueeze(0).unsqueeze(0), size=(X, X, X), mode='trilinear').squeeze(0)
+    print(f"  Starting segmentation with 1 positive point + {len(negative_pixels) if negative_pixels is not None else 0} negative points on 3 axes (6 total segment_point calls)...")
     
-    a0_mask, a1_mask, a2_mask = a0_mask.transpose(0, 1), a1_mask.transpose(0, 1), a2_mask.transpose(0, 1)
-    # utils.visualize_frame_with_mask(grid0, grid1, grid2, a0_mask, a1_mask, a2_mask, voxel_coords[idx], resolution=RESOLUTION)
+    try:
+        a0_mask_0 = torch.flip(segment_point(a0_paths_0, [pixel[idx, 2], pixel[idx, 1]], neg_points_a0, predictor), dims=[0])
+        a0_mask_1 = segment_point(a0_paths_1, [pixel[idx, 2], pixel[idx, 1]], neg_points_a0, predictor)[1:, :, :]
+        a0_mask = torch.cat([a0_mask_0, a0_mask_1], dim=0)
+        a0_mask = torch.nn.functional.interpolate(a0_mask.unsqueeze(0).unsqueeze(0), size=(X, X, X), mode='trilinear').squeeze(0)
+        
+        a1_mask_0 = torch.flip(segment_point(a1_paths_0, [pixel[idx, 2], pixel[idx, 0]], neg_points_a1, predictor), dims=[0])
+        a1_mask_1 = segment_point(a1_paths_1, [pixel[idx, 2], pixel[idx, 0]], neg_points_a1, predictor)[1:, :, :]
+        a1_mask = torch.cat([a1_mask_0, a1_mask_1], dim=0)
+        a1_mask = torch.nn.functional.interpolate(a1_mask.unsqueeze(0).unsqueeze(0), size=(X, X, X), mode='trilinear').squeeze(0)
+        
+        a2_mask_0 = torch.flip(segment_point(a2_paths_0, [pixel[idx, 1], pixel[idx, 0]], neg_points_a2, predictor), dims=[0])
+        a2_mask_1 = segment_point(a2_paths_1, [pixel[idx, 1], pixel[idx, 0]], neg_points_a2, predictor)[1:, :, :]
+        a2_mask = torch.cat([a2_mask_0, a2_mask_1], dim=0)
+        a2_mask = torch.nn.functional.interpolate(a2_mask.unsqueeze(0).unsqueeze(0), size=(X, X, X), mode='trilinear').squeeze(0)
+        
+        a0_mask, a1_mask, a2_mask = a0_mask.transpose(0, 1), a1_mask.transpose(0, 1), a2_mask.transpose(0, 1)
+        # utils.visualize_frame_with_mask(grid0, grid1, grid2, a0_mask, a1_mask, a2_mask, voxel_coords[idx], resolution=RESOLUTION)
+        
+        mask = a0_mask.permute(0, 2, 3, 1) + a1_mask.permute(2, 0, 3, 1) + a2_mask.permute(2, 3, 0, 1)
+        mask = (mask > 1.5).squeeze()[2:, 2:, 2:]
+        
+        # Clean up intermediate masks to free GPU memory
+        del a0_mask, a1_mask, a2_mask, a0_mask_0, a0_mask_1, a1_mask_0, a1_mask_1, a2_mask_0, a2_mask_1
+        del grid, grid0, grid1, grid2
+        
+    finally:
+        # Only clean up the predictor if we created it locally (not reusing from batch)
+        if predictor_created:
+            del predictor
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
     
-    mask = a0_mask.permute(0, 2, 3, 1) + a1_mask.permute(2, 0, 3, 1) + a2_mask.permute(2, 3, 0, 1)
-    mask = (mask > 1.5).squeeze()[2:, 2:, 2:]
     return mask
+
 
 def seg_box(locs, feats, prompt, args):
     num_voxels = locs.max().astype(int)

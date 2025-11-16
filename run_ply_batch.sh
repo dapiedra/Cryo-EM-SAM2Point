@@ -9,7 +9,10 @@ rm -rf video
 # Configuration
 INPUT_FOLDER="/work/dpierdra/mini_dataset"
 OUTPUT_FOLDER="/work/dpierdra/SAM2Point/output"
-VOXEL_SIZE=0.35
+
+# Best is 0.25
+#VOXEL_SIZE=0.35
+VOXEL_SIZE=0.25
 
 echo "Running batch PLY segmentation..."
 echo "Input folder: $INPUT_FOLDER"

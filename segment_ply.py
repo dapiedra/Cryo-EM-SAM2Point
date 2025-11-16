@@ -14,6 +14,7 @@ The prompt points should be marked in red color (255, 0, 0) in the points PLY fi
 """
 
 import os
+import gc
 import torch
 import argparse
 import numpy as np
@@ -44,7 +45,7 @@ class Args:
         self.prompt_type = 'point'
 
 
-def segment_ply_pointcloud(image_path, points_path, output_path, voxel_size=0.02):
+def segment_ply_pointcloud(image_path, points_path, output_path, voxel_size=0.02, predictor=None):
     """
     Segment a PLY point cloud using red-colored prompt points from another PLY file.
     
@@ -55,6 +56,7 @@ def segment_ply_pointcloud(image_path, points_path, output_path, voxel_size=0.02
         points_path (str): Path to the PLY file containing red (positive) and green (negative) prompt points
         output_path (str): Path to save the segmented PLY file
         voxel_size (float): Voxel size for processing
+        predictor: Optional pre-initialized SAM2 predictor (for batch processing to avoid OOM)
     """
     print(f"Segmenting PLY point cloud...")
     print(f"Input image: {image_path}")
@@ -176,11 +178,23 @@ def segment_ply_pointcloud(image_path, points_path, output_path, voxel_size=0.02
                 # Pass only one prompt point at a time, along with all negative points
                 single_prompt_list = [prompt_point]
                 mask = seg_point(locs, feats, single_prompt_list, args, 
-                               negative_prompt=negative_prompt_list if len(negative_prompt_list) > 0 else None)
+                               negative_prompt=negative_prompt_list if len(negative_prompt_list) > 0 else None,
+                               predictor=predictor)
                 all_masks.append(mask)
                 print(f"Successfully processed positive prompt point {i+1}")
+                
+                # Clean up GPU memory after each prompt point to prevent accumulation
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                gc.collect()
             except Exception as e:
                 print(f"Warning: Failed to process positive prompt point {i+1}: {e}")
+                # Clean up even on error
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                gc.collect()
                 continue
         
         if not all_masks:
@@ -235,7 +249,16 @@ def segment_ply_pointcloud(image_path, points_path, output_path, voxel_size=0.02
     
     print(f"Segmentation completed! Output saved to: {output_path}")
     
-    return point_mask
+    # Store result before cleanup
+    result = point_mask.sum().item()
+    
+    # Clean up GPU memory
+    del mask, point_mask, locs, feats, labels, inds_reconstruct
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+    
+    return result
 
 
 def main():

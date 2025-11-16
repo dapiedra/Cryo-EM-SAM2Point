@@ -21,10 +21,16 @@ import os
 import glob
 import argparse
 import re
+import gc
+import torch
 from pathlib import Path
 
 # Import the segmentation function from the original script
 from segment_ply import segment_ply_pointcloud
+
+# Import model building for predictor management
+from sam2.build_sam import build_sam2_video_predictor
+from segment import CHECKPOINT, MODELCFG
 
 
 def find_file_pairs(input_folder):
@@ -93,35 +99,65 @@ def process_batch(input_folder, output_folder, voxel_size=0.35):
     print(f"Found {len(file_pairs)} file pairs to process")
     print("-" * 60)
     
+    # MEMORY OPTIMIZATION: Create predictor once and reuse for all files
+    # This is the KEY to preventing OOM errors in batch processing
+    print("Loading SAM2 model (this will be reused for all files to save memory)...")
+    predictor = build_sam2_video_predictor(MODELCFG, CHECKPOINT)
+    print("Model loaded successfully!")
+    print("-" * 60)
+    
     # Process each pair
     successful = 0
     failed = 0
     
-    for i, (colored_file, points_file, identifier) in enumerate(file_pairs, 1):
-        print(f"\nProcessing pair {i}/{len(file_pairs)}: {identifier}")
-        print(f"  Image: {os.path.basename(colored_file)}")
-        print(f"  Points: {os.path.basename(points_file)}")
-        
-        # Generate output filename
-        output_file = os.path.join(output_folder, f"prediction_{identifier}.ply")
-        print(f"  Output: {os.path.basename(output_file)}")
-        
-        try:
-            # Process the pair
-            segment_ply_pointcloud(
-                image_path=colored_file,
-                points_path=points_file,
-                output_path=output_file,
-                voxel_size=voxel_size
-            )
+    try:
+        for i, (colored_file, points_file, identifier) in enumerate(file_pairs, 1):
+            print(f"\nProcessing pair {i}/{len(file_pairs)}: {identifier}")
+            print(f"  Image: {os.path.basename(colored_file)}")
+            print(f"  Points: {os.path.basename(points_file)}")
             
-            print(f"  ✓ Successfully processed {identifier}")
-            successful += 1
+            # Generate output filename
+            output_file = os.path.join(output_folder, f"prediction_{identifier}.ply")
+            print(f"  Output: {os.path.basename(output_file)}")
             
-        except Exception as e:
-            print(f"  ✗ Failed to process {identifier}: {e}")
-            failed += 1
-            continue
+            try:
+                # Process the pair with the shared predictor
+                segment_ply_pointcloud(
+                    image_path=colored_file,
+                    points_path=points_file,
+                    output_path=output_file,
+                    voxel_size=voxel_size,
+                    predictor=predictor  # Reuse the same predictor for all files
+                )
+                
+                print(f"  ✓ Successfully processed {identifier}")
+                successful += 1
+                
+                # CRITICAL: Clear GPU memory after each pair to prevent OOM errors
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                gc.collect()
+                
+            except Exception as e:
+                print(f"  ✗ Failed to process {identifier}: {e}")
+                failed += 1
+                
+                # Still clear GPU memory even after failure
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                gc.collect()
+                
+                continue
+    finally:
+        # Clean up the shared predictor at the end
+        print("\nCleaning up model...")
+        del predictor
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        gc.collect()
     
     print("\n" + "=" * 60)
     print(f"Batch processing completed!")
