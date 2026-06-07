@@ -99,6 +99,28 @@ def process_batch(input_folder, output_folder, voxel_size=0.35):
     print(f"Found {len(file_pairs)} file pairs to process")
     print("-" * 60)
     
+    # Check for existing predictions and filter out already processed files
+    files_to_process = []
+    skipped = 0
+    
+    for colored_file, points_file, identifier in file_pairs:
+        output_file = os.path.join(output_folder, f"prediction_{identifier}.ply")
+        if os.path.exists(output_file):
+            print(f"Skipping {identifier} (prediction already exists)")
+            skipped += 1
+        else:
+            files_to_process.append((colored_file, points_file, identifier))
+    
+    if skipped > 0:
+        print(f"\nSkipped {skipped} already processed file(s)")
+    
+    if not files_to_process:
+        print("\nAll files have already been processed. Nothing to do.")
+        return
+    
+    print(f"\nRemaining files to process: {len(files_to_process)}")
+    print("-" * 60)
+    
     # MEMORY OPTIMIZATION: Create predictor once and reuse for all files
     # This is the KEY to preventing OOM errors in batch processing
     print("Loading SAM2 model (this will be reused for all files to save memory)...")
@@ -111,8 +133,8 @@ def process_batch(input_folder, output_folder, voxel_size=0.35):
     failed = 0
     
     try:
-        for i, (colored_file, points_file, identifier) in enumerate(file_pairs, 1):
-            print(f"\nProcessing pair {i}/{len(file_pairs)}: {identifier}")
+        for i, (colored_file, points_file, identifier) in enumerate(files_to_process, 1):
+            print(f"\nProcessing pair {i}/{len(files_to_process)}: {identifier}")
             print(f"  Image: {os.path.basename(colored_file)}")
             print(f"  Points: {os.path.basename(points_file)}")
             
@@ -161,8 +183,11 @@ def process_batch(input_folder, output_folder, voxel_size=0.35):
     
     print("\n" + "=" * 60)
     print(f"Batch processing completed!")
-    print(f"Successfully processed: {successful}/{len(file_pairs)}")
-    print(f"Failed: {failed}/{len(file_pairs)}")
+    if skipped > 0:
+        print(f"Skipped (already processed): {skipped}")
+    print(f"Successfully processed: {successful}/{len(files_to_process)}")
+    print(f"Failed: {failed}/{len(files_to_process)}")
+    print(f"Total files in input folder: {len(file_pairs)}")
     print(f"Output folder: {output_folder}")
 
 

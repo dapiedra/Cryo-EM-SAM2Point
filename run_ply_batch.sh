@@ -7,8 +7,8 @@
 rm -rf video
 
 # Configuration
-INPUT_FOLDER="/work/dpierdra/mini_dataset"
-OUTPUT_FOLDER="/work/dpierdra/SAM2Point/output"
+INPUT_FOLDER="/work/dpierdra/datasets/dataset_full/test_data_input_20p_10n_no_thr"
+OUTPUT_FOLDER="/work/dpierdra/SAM2Point/output_20p_10n_no_thr"
 
 # Best is 0.25
 #VOXEL_SIZE=0.35
