@@ -35,34 +35,46 @@ from segment import CHECKPOINT, MODELCFG
 
 def find_file_pairs(input_folder):
     """
-    Find pairs of colored_*.ply and points_*.ply files in the input folder.
+    Find pairs of colored_*.ply / map_*.ply and points_*.ply files in the input folder.
+    colored_ is the primary format, and map_ is used as a fallback when no valid
+    colored_ files are found.
     
     Args:
         input_folder (str): Path to the input folder
         
     Returns:
-        list: List of tuples (colored_file, points_file, identifier)
+        list: List of tuples (source_file, points_file, identifier)
     """
     input_path = Path(input_folder)
-    
-    # Find all colored_*.ply files
-    colored_files = list(input_path.glob("colored_*.ply"))
-    
-    pairs = []
-    for colored_file in colored_files:
-        # Extract the identifier from the filename
-        # colored_10274_1.ply -> 10274_1
-        match = re.match(r'colored_(.+)\.ply$', colored_file.name)
-        if match:
-            identifier = match.group(1)
-            points_file = input_path / f"points_{identifier}.ply"
-            
-            if points_file.exists():
-                pairs.append((str(colored_file), str(points_file), identifier))
-                print(f"Found pair: {colored_file.name} + {points_file.name} -> prediction_{identifier}.ply")
-            else:
-                print(f"Warning: Missing points file for {colored_file.name} (expected: {points_file.name})")
-    
+
+    def build_pairs_for_prefix(prefix):
+        files = list(input_path.glob(f"{prefix}*.ply"))
+        pairs = []
+        for source_file in files:
+            # Extract the identifier from the filename
+            # colored_10274_1.ply -> 10274_1
+            # map_10274_1.ply -> 10274_1
+            match = re.match(rf'{prefix}(.+)\.ply$', source_file.name)
+            if match:
+                identifier = match.group(1)
+                points_file = input_path / f"points_{identifier}.ply"
+
+                if points_file.exists():
+                    pairs.append((str(source_file), str(points_file), identifier))
+                    print(f"Found pair: {source_file.name} + {points_file.name} -> prediction_{identifier}.ply")
+                else:
+                    print(f"Warning: Missing points file for {source_file.name} (expected: {points_file.name})")
+
+        return pairs
+
+    # Primary format: colored_*.ply
+    pairs = build_pairs_for_prefix("colored_")
+    if pairs:
+        return pairs
+
+    # Fallback format: map_*.ply
+    print("No valid colored_ file pairs found; trying map_ fallback format.")
+    pairs = build_pairs_for_prefix("map_")
     return pairs
 
 
@@ -94,6 +106,7 @@ def process_batch(input_folder, output_folder, voxel_size=0.35):
     if not file_pairs:
         print("No valid file pairs found in the input folder.")
         print("Expected format: colored_XXXX_X.ply and points_XXXX_X.ply")
+        print("Fallback format: map_XXXX_X.ply and points_XXXX_X.ply")
         return
     
     print(f"Found {len(file_pairs)} file pairs to process")

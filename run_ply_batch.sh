@@ -7,8 +7,8 @@
 rm -rf video
 
 # Configuration
-INPUT_FOLDER="/work/dpierdra/datasets/dataset_full/test_data_input_20p_10n_no_thr"
-OUTPUT_FOLDER="/work/dpierdra/SAM2Point/output_20p_10n_no_thr"
+INPUT_FOLDER="/work/dpierdra/datasets/dataset_full/grayscale/test_data_input_5p_5n"
+OUTPUT_FOLDER="/work/dpierdra/results/grayscale/SAM2Point/5p_5n/output_ply"
 
 # Best is 0.25
 #VOXEL_SIZE=0.35

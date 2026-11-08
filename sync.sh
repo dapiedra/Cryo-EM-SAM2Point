@@ -1,1 +1,1 @@
-rsync --exclude-from='.rsync-exclude' -avz --delete /home/dpiedra/learning/maestria_tec/tesis/repos/SAM2Point/ kabre:/work/dpierdra/SAM2Point
+rsync --exclude-from='.rsync-exclude' -avz --delete /home/dpiedra/learning/maestria_tec/tesis/repos/Cryo-EM-SAM2Point/ kabre:/work/dpierdra/SAM2Point
