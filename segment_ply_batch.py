@@ -12,6 +12,7 @@ Output files are named prediction_XXXX_X.ply
 
 Usage:
     python segment_ply_batch.py --input-folder /path/to/input --output-folder /path/to/output --voxel-size 0.35
+    python segment_ply_batch.py --input-folder /path/to/input --maps-folder /path/to/maps --output-folder /path/to/output
 
 The prompt points should be marked in red color (255, 0, 0) for positive prompts
 and green color (0, 255, 0) for negative prompts in the points PLY files.
@@ -33,62 +34,88 @@ from sam2.build_sam import build_sam2_video_predictor
 from segment import CHECKPOINT, MODELCFG
 
 
-def find_file_pairs(input_folder):
+def find_file_pairs(input_folder, maps_folders=None):
     """
-    Find pairs of colored_*.ply / map_*.ply and points_*.ply files in the input folder.
-    colored_ is the primary format, and map_ is used as a fallback when no valid
-    colored_ files are found.
-    
+    Find pairs of colored_*.ply / map_*.ply and points_*.ply files.
+
+    The colored_/map_ source files are looked up first in the input folder,
+    then in each of the optional maps_folders (in the order given, first
+    match wins per identifier). points_*.ply files are only looked up in the
+    input folder. For each identifier, colored_ is preferred over map_ across
+    all search folders.
+
     Args:
-        input_folder (str): Path to the input folder
-        
+        input_folder (str): Path to the input folder (points_*.ply always come
+            from here)
+        maps_folders (list): Optional extra folders searched for
+            colored_*.ply / map_*.ply files missing from the input folder
+
     Returns:
         list: List of tuples (source_file, points_file, identifier)
     """
     input_path = Path(input_folder)
+    search_folders = [input_path] + [Path(f) for f in (maps_folders or [])]
 
-    def build_pairs_for_prefix(prefix):
-        files = list(input_path.glob(f"{prefix}*.ply"))
-        pairs = []
-        for source_file in files:
-            # Extract the identifier from the filename
-            # colored_10274_1.ply -> 10274_1
-            # map_10274_1.ply -> 10274_1
+    def index_by_identifier(path, prefix):
+        """Index files per identifier; first folder wins for duplicate names."""
+        indexed = {}
+        for source_file in sorted(path.glob(f"{prefix}*.ply")):
             match = re.match(rf'{prefix}(.+)\.ply$', source_file.name)
             if match:
-                identifier = match.group(1)
-                points_file = input_path / f"points_{identifier}.ply"
+                indexed.setdefault(match.group(1), source_file)
+        return indexed
 
-                if points_file.exists():
-                    pairs.append((str(source_file), str(points_file), identifier))
-                    print(f"Found pair: {source_file.name} + {points_file.name} -> prediction_{identifier}.ply")
-                else:
-                    print(f"Warning: Missing points file for {source_file.name} (expected: {points_file.name})")
+    colored = {}
+    maps = {}
+    points = {}
+    for folder in search_folders:
+        if not folder.is_dir():
+            print(f"Warning: search folder not found, skipping: {folder}")
+            continue
+        found_colored = index_by_identifier(folder, "colored_")
+        found_maps = index_by_identifier(folder, "map_")
+        for identifier, file in found_colored.items():
+            colored.setdefault(identifier, file)
+        for identifier, file in found_maps.items():
+            maps.setdefault(identifier, file)
+    # points_ files are only paired from the input folder
+    points = index_by_identifier(input_path, "points_")
 
-        return pairs
+    pairs = []
+    for identifier in sorted(set(colored) | set(maps)):
+        # Per-identifier preference: colored_ anywhere before map_
+        source_file = colored.get(identifier) or maps.get(identifier)
+        points_file = points.get(identifier)
 
-    # Primary format: colored_*.ply
-    pairs = build_pairs_for_prefix("colored_")
-    if pairs:
-        return pairs
+        if points_file is not None:
+            pairs.append((str(source_file), str(points_file), identifier))
+            print(f"Found pair: {source_file.name} (from {source_file.parent}) + "
+                  f"{points_file.name} -> prediction_{identifier}.ply")
+        else:
+            print(f"Warning: Missing points file for {source_file.name} "
+                  f"(expected: points_{identifier}.ply in {input_path})")
 
-    # Fallback format: map_*.ply
-    print("No valid colored_ file pairs found; trying map_ fallback format.")
-    pairs = build_pairs_for_prefix("map_")
+    if not pairs:
+        print("No valid colored_ or map_ file pairs found.")
     return pairs
 
 
-def process_batch(input_folder, output_folder, voxel_size=0.35):
+def process_batch(input_folder, output_folder, voxel_size=0.35, maps_folders=None):
     """
     Process all file pairs in the input folder.
     
     Args:
-        input_folder (str): Path to the input folder containing file pairs
+        input_folder (str): Path to the input folder containing points_*.ply files
         output_folder (str): Path to the output folder for results
         voxel_size (float): Voxel size for processing
+        maps_folders (list): Optional extra folders searched for
+            colored_/map_ files missing from the input folder
     """
     print(f"Processing batch segmentation...")
     print(f"Input folder: {input_folder}")
+    if maps_folders:
+        print(f"Extra maps folders: {', '.join(maps_folders)}")
+    print(f"Output folder: {output_folder}")
     print(f"Output folder: {output_folder}")
     print(f"Voxel size: {voxel_size}")
     print("-" * 60)
@@ -101,12 +128,11 @@ def process_batch(input_folder, output_folder, voxel_size=0.35):
     os.makedirs(output_folder, exist_ok=True)
     
     # Find all file pairs
-    file_pairs = find_file_pairs(input_folder)
-    
+    file_pairs = find_file_pairs(input_folder, maps_folders)
+
     if not file_pairs:
-        print("No valid file pairs found in the input folder.")
-        print("Expected format: colored_XXXX_X.ply and points_XXXX_X.ply")
-        print("Fallback format: map_XXXX_X.ply and points_XXXX_X.ply")
+        print("No valid file pairs found.")
+        print("Expected format: colored_XXXX_X.ply (or map_XXXX_X.ply) + points_XXXX_X.ply")
         return
     
     print(f"Found {len(file_pairs)} file pairs to process")
@@ -213,6 +239,7 @@ def main():
 Examples:
     python segment_ply_batch.py --input-folder /path/to/input --output-folder /path/to/output
     python segment_ply_batch.py --input-folder ./data --output-folder ./results --voxel-size 0.35
+    python segment_ply_batch.py --input-folder ./points --maps-folder ./maps --output-folder ./results
     
 Expected input file format:
     - colored_XXXX_X.ply (point cloud to segment)
@@ -225,6 +252,10 @@ Output file format:
     
     parser.add_argument('--input-folder', required=True, type=str,
                         help='Path to the input folder containing PLY file pairs')
+    parser.add_argument('--maps-folder', action='append', type=str, default=[],
+                        help='Extra folder searched for colored_*.ply / map_*.ply files '
+                             'when not found in the input folder. Can be passed multiple times; '
+                             'searched in the order given.')
     parser.add_argument('--output-folder', required=True, type=str,
                         help='Path to the output folder for segmentation results')
     parser.add_argument('--voxel-size', type=float, default=0.35,
@@ -236,7 +267,8 @@ Output file format:
         process_batch(
             input_folder=args.input_folder,
             output_folder=args.output_folder,
-            voxel_size=args.voxel_size
+            voxel_size=args.voxel_size,
+            maps_folders=args.maps_folder
         )
     except Exception as e:
         print(f"Error: {e}")
